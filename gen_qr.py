@@ -11,9 +11,11 @@ from PIL import Image
 from PIL import ImageFont
 from PIL import ImageDraw
 from rlp.sedes import big_endian_int, List
+from rlp.exceptions import ListDeserializationError
 from base64 import urlsafe_b64encode, urlsafe_b64decode
 
-header_fmt = List([big_endian_int, big_endian_int])
+short_header_fmt = List([big_endian_int, big_endian_int])
+header_fmt = List([big_endian_int, big_endian_int, big_endian_int])
 _FONT_PATH = os.getenv('FONT_PATH', 'Arial.ttf')
 
 
@@ -44,15 +46,22 @@ def get_arg_parser():
     parser.add_argument(
         '-o',
         "--output_dir",
-        default='output',
+        default=None,
         help='The path to a directory where pngs will be written')
 
     parser.add_argument(
-        '-c',
-        '--count',
+        '-b',
+        '--begin',
+        type=int,
+        default=0,
+        help='The first tag_id for which a qr codes will be produced')
+
+    parser.add_argument(
+        '-e',
+        '--end',
         type=int,
         default=1,
-        help='The number of qr codes to be produced')
+        help='One greater than the last tag_id for which a qr codes will be produced')
 
     return parser
 
@@ -67,16 +76,19 @@ def validate_code(secret, code):
     if not hmac.compare_digest(sig, signature_bytes):
         raise Exception('signature does not validate')
 
-    segment_id, tag_id = rlp.decode(promo_id, header_fmt)
-    return segment_id, tag_id
+    try:
+        promo_id_data = rlp.decode(promo_id, header_fmt)
+    except ListDeserializationError:
+        promo_id_data = (0, *rlp.decode(promo_id, short_header_fmt))
+    return promo_id_data
 
 
-def create_code(secret, segment_id, tag_id):
-    promo_id = rlp.encode([segment_id, tag_id], header_fmt)
+def create_code(secret, promo_id_data):
+    promo_id = rlp.encode(promo_id_data, header_fmt)
     promo_code_bytes = promo_id + hmac.new(secret, promo_id, 'sha256').digest()[:20]
     promo_code_b64 = urlsafe_b64encode(promo_code_bytes)
     result = promo_code_b64.decode().rstrip('=')
-    assert validate_code(secret, result) == (segment_id, tag_id)
+    assert validate_code(secret, result) == promo_id_data
 
     return result
 
@@ -99,8 +111,8 @@ def generate_img(url, code):
     return stack_images((np.array(img).astype(np.uint8) * 255, text_img))
 
 
-def write_image(output_path, segment_id, tag_id, img):
-    file_name = 'promo-qr__{}.{}.png'.format(segment_id, tag_id)
+def write_image(output_path, promo_id_data, img):
+    file_name = 'promo-qr__{}.{}.{}.png'.format(*promo_id_data)
     path = os.path.join(output_path, file_name)
     img.save(path, 'png')
 
@@ -108,23 +120,27 @@ def write_image(output_path, segment_id, tag_id, img):
 def main(argv):
     opts = get_arg_parser().parse_args(argv[1:])
 
+    key_id = os.getenv('SECRET_KEY_ID', 0)
     secret_hex = os.getenv('SECRET_HEX')
     if not secret_hex:
         raise Exception('secret_hex is required')
     secret = bytes.fromhex(secret_hex)
 
-    mkdirs_exists_ok(opts.output_dir)
-    for tag_id in tqdm(range(opts.count)):
-        code = create_code(secret, opts.segment_id, tag_id)
+    output_dir = opts.output_dir or 'qr_codes.{}.{}.{}-{}'.format(
+        key_id, opts.segment_id, opts.begin, opts.end - 1)
+    mkdirs_exists_ok(output_dir)
+    for tag_id in tqdm(range(opts.begin, opts.end)):
+        promo_id_data = (key_id, opts.segment_id, tag_id)
+        code = create_code(secret, promo_id_data)
         url = opts.base_url + code
         img = generate_img(url, code)
-        write_image(opts.output_dir, opts.segment_id, tag_id, img)
+        write_image(output_dir, promo_id_data, img)
 
     subprocess.check_call([
         'zip',
-        'qr_codes.{}.0-{}.zip'.format(opts.segment_id, opts.count - 1),
+        '{}.zip'.format(output_dir),
         '-R',
-        '{}/*'.format(opts.output_dir),
+        '{}/*'.format(output_dir),
     ])
 
 
