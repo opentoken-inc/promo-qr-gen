@@ -120,7 +120,7 @@ def write_image(output_path, promo_id_data, img):
 def main(argv):
     opts = get_arg_parser().parse_args(argv[1:])
 
-    key_id = os.getenv('SECRET_KEY_ID', 0)
+    key_id = int(os.getenv('SECRET_KEY_ID', 0))
     secret_hex = os.getenv('SECRET_HEX')
     if not secret_hex:
         raise Exception('secret_hex is required')
